@@ -26,3 +26,5 @@ lerna-debug.log*
 
 # dataset
 *.parquet
+CLAUDE.md
+project_description.md
