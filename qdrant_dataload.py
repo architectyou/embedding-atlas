@@ -64,6 +64,64 @@ def extract_year_from_source(source: str) -> Optional[int]:
     return None
 
 
+def create_display_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Create intuitive display fields for visualization and search optimization."""
+    df_copy = df.copy()
+
+    # 선수 이름 필드 찾기 (다양한 가능한 컬럼명)
+    name_columns = ['name', 'player_name', 'player', 'athlete', 'person', 'title']
+    name_col = None
+    for col in name_columns:
+        if col in df_copy.columns:
+            name_col = col
+            break
+
+    # 핵심 표시 필드 생성
+    if name_col:
+        # 연도와 선수 정보를 조합한 display_name 생성
+        if 'year' in df_copy.columns:
+            def create_display_name(row):
+                name = row[name_col] if pd.notna(row[name_col]) else "Unknown"
+                year = f" ({int(row['year'])})" if pd.notna(row['year']) else ""
+                return f"{name}{year}"
+
+            df_copy['display_name'] = df_copy.apply(create_display_name, axis=1)
+            print(f"Created display_name field combining {name_col} and year")
+        else:
+            df_copy['display_name'] = df_copy[name_col].fillna("Unknown")
+
+    # Embedding Atlas hover용 간결한 text 필드 생성
+    def create_hover_text(row):
+        parts = []
+
+        # 기본 정보 (이름, 연도)
+        if name_col and pd.notna(row[name_col]):
+            parts.append(row[name_col])
+        if 'year' in df_copy.columns and pd.notna(row['year']):
+            parts.append(f"({int(row['year'])})")
+
+        # 핵심 메타데이터만 (짧은 것들만)
+        if 'team' in df_copy.columns and pd.notna(row['team']):
+            team = str(row['team'])
+            if len(team) <= 20:  # 짧은 팀명만
+                parts.append(team)
+
+        return " ".join(parts) if parts else f"ID: {row['id']}"
+
+    df_copy['text'] = df_copy.apply(create_hover_text, axis=1)
+    print("Created compact text field for hover tooltips")
+
+    # 간단한 연도별 통계만
+    if 'year' in df_copy.columns:
+        year_count = df_copy['year'].notna().sum()
+        if year_count > 0:
+            years = df_copy['year'].dropna()
+            year_range = f"{int(years.min())}-{int(years.max())}"
+            print(f"Year data: {year_count}/{len(df_copy)} records, range: {year_range}")
+
+    return df_copy
+
+
 def extract_collection_data(
     client: QdrantClient,
     collection_name: str,
@@ -140,15 +198,17 @@ def extract_collection_data(
             year_count = df["year"].notna().sum()
             print(f"Successfully extracted year for {year_count}/{len(df)} records")
 
-            # 연도별 분포 출력
-            if year_count > 0:
-                year_dist = df["year"].value_counts().sort_index()
-                print("Year distribution:")
-                for year, count in year_dist.head(10).items():
-                    print(f"  {year}: {count} records")
+        # Create intuitive display fields
+        df = create_display_fields(df)
 
         print(f"DataFrame created with shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
+
+        # 핵심 필드 확인
+        key_fields = ['display_name', 'text', 'year', 'vector']
+        existing_key = [field for field in key_fields if field in df.columns]
+        if existing_key:
+            print(f"Key fields: {existing_key}")
 
         return df
 
@@ -183,7 +243,7 @@ def save_to_parquet(df: pd.DataFrame, output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract data from Qdrant and prepare for Embedding Atlas"
+        description="Extract data from Qdrant and prepare for Embedding Atlas with year integration"
     )
     parser.add_argument(
         "--url",
@@ -200,6 +260,14 @@ def main():
     )
     parser.add_argument(
         "--limit", type=int, help="Maximum number of points to extract (default: all)"
+    )
+    parser.add_argument(
+        "--year-filter", type=int, nargs="+",
+        help="Filter by specific years (e.g., --year-filter 2020 2021 2022)"
+    )
+    parser.add_argument(
+        "--year-range", type=int, nargs=2, metavar=("START", "END"),
+        help="Filter by year range (e.g., --year-range 2020 2023)"
     )
     parser.add_argument(
         "--list-collections",
@@ -223,12 +291,58 @@ def main():
     # Extract data
     df = extract_collection_data(client, args.collection, args.limit)
 
+    # Apply year filtering if requested
+    if args.year_filter or args.year_range:
+        original_size = len(df)
+
+        if args.year_filter:
+            df = df[df['year'].isin(args.year_filter)]
+            print(f"Filtered to years {args.year_filter}: {len(df)} records (from {original_size})")
+
+        elif args.year_range:
+            start_year, end_year = args.year_range
+            df = df[(df['year'] >= start_year) & (df['year'] <= end_year)]
+            print(f"Filtered to years {start_year}-{end_year}: {len(df)} records (from {original_size})")
+
+        if len(df) == 0:
+            print("Warning: No data remaining after year filtering!")
+            return
+
     # Save to parquet
     save_to_parquet(df, args.output)
 
-    print(f"\nData extraction complete!")
-    print(f"To visualize with Embedding Atlas, run:")
-    print(f"embedding-atlas {args.output} --vector vector")
+    print(f"\n{'='*50}")
+    print(f"✅ Data extraction complete!")
+    print(f"{'='*50}")
+
+    # 요약 정보 출력
+    if 'year' in df.columns:
+        years = df['year'].dropna().unique()
+        if len(years) > 0:
+            year_range = f"{int(min(years))}-{int(max(years))}"
+            print(f"📅 Data spans: {year_range} ({len(years)} different years)")
+
+    if 'display_name' in df.columns:
+        unique_players = df['display_name'].nunique()
+        print(f"👤 Total unique entries: {unique_players}")
+
+    print(f"📊 Total records: {len(df)}")
+    print(f"💾 Saved to: {args.output}")
+
+    print(f"\n🚀 To visualize with Embedding Atlas:")
+    print(f"   embedding-atlas {args.output} --vector vector")
+
+    print("\n🔍 Key fields:")
+    print("   • text: hover tooltips")
+    print("   • display_name: player + year labels")
+    print("   • year: temporal filtering")
+    print("   • vector: embedding coordinates")
+
+    if 'display_name' in df.columns and len(df) > 0:
+        print(f"\n📈 Sample entries:")
+        sample_names = df['display_name'].dropna().head(3).tolist()
+        for name in sample_names:
+            print(f"   • {name}")
 
 
 if __name__ == "__main__":

@@ -279,12 +279,19 @@ def main(host, port, auto_port, duckdb, static):
     parquet_data_dir = Path(__file__).parent / "parquet_data"
 
     # Parquet 파일들 자동 감지 및 추가
+    # 엔드포인트 이름, 파일명, 벡터 컬럼명
     parquet_files = [
-        ("bge_fomc_0815", "bge_fomc_0815.parquet", "vector"),
-        ("bge_fomc_non_preprocessed", "bge_fomc_non_preprocessed.parquet", "vector"),
-        ("scouting_report_bgem3", "scouting_report_bgem3.parquet", "vector"),
-        ("scouting_report_openai", "scouting_report_openai.parquet", "vector"),
-        ("scouting_report_qwen8b", "scouting_report_qwen8b.parquet", "vector"),
+        ("scouting_report_bgem3", "scouting_report_bgem3_with_year.parquet", "vector"),
+        (
+            "scouting_report_openai",
+            "scouting_report_openai_with_year.parquet",
+            "vector",
+        ),
+        (
+            "scouting_report_qwen8b",
+            "scouting_report_qwen8b_with_year.parquet",
+            "vector",
+        ),
     ]
 
     for name, file_name, vector_col in parquet_files:
