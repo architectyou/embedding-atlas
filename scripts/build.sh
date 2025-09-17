@@ -5,28 +5,30 @@
 set -euxo pipefail
 
 pushd packages/component
-npm run package
+npm run build
 popd
 
 pushd packages/table
-npm run package
+npm run build
 popd
 
 pushd packages/viewer
-npm run package
+npm run build
 popd
 
 pushd packages/embedding-atlas
-npm run package
+npm run build
 popd
 
 pushd packages/examples
 npm run build
 popd
 
+set +e
 pushd packages/backend
-./build.sh
+./build.sh || true
 popd
+set -e
 
 pushd packages/docs
 npm run build

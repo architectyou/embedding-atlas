@@ -120,14 +120,17 @@
     }
   }
 
-  // Click point
+  // Click point: emit only on actual selection changes
   function emitClickPoint(point: DataPoint) {
     onClickPoint?.(point);
   }
 
+  let lastEmittedSelection: any = null;
   $effect(() => {
-    if (selection?.[0] != null) {
-      emitClickPoint(selection?.[0]);
+    const current = selection?.[0];
+    if (current != null && current !== lastEmittedSelection) {
+      lastEmittedSelection = current;
+      emitClickPoint(current);
     }
   });
 

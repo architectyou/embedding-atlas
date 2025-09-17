@@ -204,6 +204,12 @@
       textColumn,
       neighborsColumn,
       searcher: specifiedSearcher,
+      additionalTextColumns: (() => {
+        const cols: string[] = [];
+        const playerCol = columns.find((x) => x.name.toLowerCase() === 'player_name')?.name;
+        if (playerCol && playerCol !== textColumn) cols.push(playerCol);
+        return cols;
+      })(),
     }),
   );
 
@@ -226,6 +232,35 @@
     items: SearchResultItem[];
   } | null = $state(null);
   let searchResultHighlight = $state<SearchResultItem | null>(null);
+  
+  // Nearest neighbor search state for clicked points
+  let selectedPointId: any = $state(null);
+  let nearestNeighborResult: {
+    label: string;
+    items: SearchResultItem[];
+    selectedPoint: SearchResultItem | null;
+    playerGroups: Map<string, SearchResultItem[]>;
+    playerColors: Map<string, string>;
+  } | null = $state(null);
+
+  // Player-name based filtering support
+  const playerFilterClient = { reset: () => {} };
+  const playerNameColumn: string | null = $derived(() => {
+    const c = columns.find((x) => x.name.toLowerCase() === 'player_name');
+    return c?.name ?? null;
+  });
+  function setPlayerNameFilter(name: string) {
+    if (!playerNameColumn) return;
+    const predicate = SQL.eq(SQL.column(playerNameColumn), SQL.literal(name));
+    const clause = {
+      source: playerFilterClient,
+      clients: new Set().add(playerFilterClient),
+      value: name,
+      predicate: predicate.toString ? predicate.toString() : (predicate as any),
+    };
+    crossFilter.activate(clause);
+    crossFilter.update(clause);
+  }
 
   async function doSearch(query: any, mode: string) {
     if (searcher == null || searchModeOptions.length == 0) {
@@ -298,11 +333,133 @@
     searchResultVisible = false;
   }
 
+  // Nearest neighbor search for clicked points
+  async function doNearestNeighborSearch(pointId: any) {
+    if (!allowNearestNeighborSearch || searcher.nearestNeighbors == null) {
+      return;
+    }
+
+    selectedPointId = pointId;
+    searcherStatus = "Finding nearest neighbors...";
+
+    try {
+      let predicate = currentPredicate();
+      let searcherResult = await searcher.nearestNeighbors(pointId, {
+        limit: searchLimit, // Get more results to filter by player
+        predicate: predicate,
+        onStatus: (status: string) => {
+          searcherStatus = status;
+        },
+      });
+
+      // Get the selected point data
+      let selectedPointResult = await querySearchResultItems(
+        coordinator,
+        table,
+        { id: idColumn, x: projectionColumns?.x, y: projectionColumns?.y, text: textColumn },
+        additionalFields,
+        predicate,
+        [{ id: pointId }],
+      );
+
+      // Get nearest neighbor results
+      let neighborItems = await querySearchResultItems(
+        coordinator,
+        table,
+        { id: idColumn, x: projectionColumns?.x, y: projectionColumns?.y, text: textColumn },
+        additionalFields,
+        predicate,
+        searcherResult,
+      );
+
+      const selectedPoint = selectedPointResult[0] || null;
+      
+      // Group by player and filter out same player embeddings
+      const playerGroups = new Map<string, SearchResultItem[]>();
+      const playerColors = new Map<string, string>();
+
+      // Prefer explicit player_name field; fall back to text or id
+      const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+      function getPlayerName(item: SearchResultItem): { display: string; key: string } {
+        const byField = (item as any).fields?.player_name as string | undefined;
+        if (byField && byField.trim().length > 0) {
+          const display = byField.trim();
+          return { display, key: normalize(display) };
+        }
+        if (item.text) {
+          const match = item.text.match(/^([^,]+)/);
+          const display = (match ? match[1] : item.text.split(' ').slice(0, 2).join(' ')).trim();
+          return { display, key: normalize(display) };
+        }
+        const display = (String(item.id).split('_')[0] || String(item.id)).trim();
+        return { display, key: normalize(display) };
+      }
+
+      // Get selected player name
+      const selectedInfo = selectedPoint ? getPlayerName(selectedPoint) : { display: '', key: '' };
+
+      // Filter and group neighbors (keep only closest per player)
+      const filteredNeighbors: SearchResultItem[] = [];
+      const seenPlayers = new Set<string>(); // normalized key
+
+      for (const item of neighborItems) {
+        const { display, key } = getPlayerName(item);
+        // Skip if same player as selected
+        if (key && key === selectedInfo.key) continue;
+
+        // Group
+        if (!playerGroups.has(display)) {
+          playerGroups.set(display, []);
+        }
+        playerGroups.get(display)!.push(item);
+
+        // Deduplicate by normalized key, preserving order (nearest first)
+        if (!seenPlayers.has(key) && seenPlayers.size < 5) {
+          seenPlayers.add(key);
+          filteredNeighbors.push(item);
+        }
+      }
+
+      // Colors per displayed player
+      const displayNames = filteredNeighbors.map((it) => getPlayerName(it).display);
+      displayNames.forEach((name, index) => {
+        const hue = (index * 360 / Math.max(displayNames.length, 1)) % 360;
+        const saturation = 70 + (index * 10) % 30;
+        const lightness = 45 + (index * 15) % 25;
+        playerColors.set(name, `hsl(${hue}, ${saturation}%, ${lightness}%)`);
+      });
+
+      searcherStatus = "";
+      nearestNeighborResult = {
+        label: `5 most similar players to ${selectedInfo.display}`,
+        items: filteredNeighbors,
+        selectedPoint: selectedPoint,
+        playerGroups: playerGroups,
+        playerColors: playerColors,
+      };
+
+      // Clear regular search results when showing nearest neighbors
+      searchResult = null;
+      searchResultVisible = false;
+
+    } catch (error) {
+      console.error("Nearest neighbor search failed:", error);
+      searcherStatus = "";
+    }
+  }
+
+  function clearNearestNeighborSearch() {
+    selectedPointId = null;
+    nearestNeighborResult = null;
+  }
+
   $effect.pre(() => {
     if (searchQuery == "") {
       clearSearch();
     } else {
       debouncedSearch(searchQuery, searchMode);
+      // Clear nearest neighbor results when doing regular search
+      clearNearestNeighborSearch();
     }
   });
 
@@ -344,13 +501,23 @@
 
   // Animation
 
-  async function animateEmbeddingViewToPoint(identifier?: any, x?: number, y?: number): Promise<void> {
+  async function animateEmbeddingViewToPoint(
+    identifier?: any,
+    x?: number,
+    y?: number,
+    options: { showTooltip?: boolean } = { showTooltip: true },
+  ): Promise<void> {
     if (defaultViewportScale == null) {
       return;
     }
 
     let scale = (await defaultViewportScale) * 2;
-    if (x == null || y == null) {
+    // If coordinates are not provided, we need a valid identifier to look them up.
+    if ((x == null || y == null)) {
+      if (identifier == null) {
+        // No-op if neither coordinates nor identifier are provided.
+        return;
+      }
       if (projectionColumns == null) {
         return;
       }
@@ -362,7 +529,11 @@
           })
           .where(SQL.eq(SQL.column(idColumn), SQL.literal(identifier))),
       );
-      let item: { x: number; y: number } = result.get(0);
+      let item: { x: number; y: number } | null = result.get(0);
+      if (!item || item.x == null || item.y == null) {
+        console.warn('Could not find coordinates for identifier:', identifier);
+        return;
+      }
       x = item.x;
       y = item.y;
     }
@@ -371,7 +542,9 @@
       y: y,
       scale: scale,
     });
-    embeddingView?.showTooltip(identifier);
+    if (options.showTooltip) {
+      embeddingView?.showTooltip(identifier);
+    }
   }
 
   // Filter
@@ -382,6 +555,8 @@
       source?.reset?.();
       crossFilter.update({ ...item, value: null, predicate: null });
     }
+    // Clear nearest neighbor results when resetting filters
+    clearNearestNeighborSearch();
   }
 
   function makeAdditionalFields(columns: any) {
@@ -511,7 +686,11 @@
                         onClick={async (item) => {
                           scrollTableTo(item.id);
                           searchResultHighlight = item;
-                          await animateEmbeddingViewToPoint(item.id, item.x, item.y);
+                          if (item.x != null && item.y != null) {
+                            await animateEmbeddingViewToPoint(item.id, item.x, item.y);
+                          } else {
+                            await animateEmbeddingViewToPoint(item.id);
+                          }
                         }}
                         onClose={clearSearch}
                         columnStyles={resolvedColumnStyles}
@@ -693,8 +872,34 @@
                 }}
                 customOverlay={searchResult
                   ? { class: CustomOverlay, props: { items: searchResult.items, highlightItem: searchResultHighlight } }
+                  : nearestNeighborResult
+                  ? { 
+                      class: CustomOverlay, 
+                      props: { 
+                        items: [...(nearestNeighborResult.selectedPoint ? [nearestNeighborResult.selectedPoint] : []), ...nearestNeighborResult.items], 
+                        highlightItem: nearestNeighborResult.selectedPoint,
+                        nearestNeighborMode: true,
+                        selectedPointId: selectedPointId,
+                        playerColors: nearestNeighborResult.playerColors,
+                        playerGroups: nearestNeighborResult.playerGroups
+                      } 
+                    }
                   : null}
-                onClickPoint={(p) => scrollTableTo(p.identifier)}
+                onClickPoint={async (p) => {
+                  console.log('Point clicked:', p);
+                  const pointId =
+                    typeof p === 'object' && p != null
+                      ? (p as any).identifier ?? (p as any).id ?? (p as any).pointId
+                      : p;
+                  console.log('Using pointId:', pointId);
+                  if (pointId == null) {
+                    console.error('No valid identifier found in point data:', p);
+                    return;
+                  }
+                  scrollTableTo(pointId);
+                  await doNearestNeighborSearch(pointId);
+                  await animateEmbeddingViewToPoint(pointId, undefined, undefined, { showTooltip: false });
+                }}
                 stateStore={plotStateStores.store("embedding-view")}
               />
             </div>
@@ -727,7 +932,9 @@
                     filter={crossFilter}
                     scrollTo={tableScrollTo}
                     onRowClick={async (identifier) => {
-                      await animateEmbeddingViewToPoint(identifier);
+                      if (identifier != null) {
+                        await animateEmbeddingViewToPoint(identifier);
+                      }
                     }}
                     numLines={3}
                     colorScheme={$darkMode ? "dark" : "light"}
@@ -765,6 +972,94 @@
             class="w-full rounded-md overflow-x-hidden overflow-y-scroll"
             style:width={fullWidth ? null : `${panelWidth}px`}
           >
+            <!-- Nearest Neighbor Results Panel -->
+            {#if nearestNeighborResult}
+              <div class="bg-white dark:bg-slate-900 rounded-md mb-4 border border-slate-200 dark:border-slate-700">
+                <div class="p-3 border-b border-slate-200 dark:border-slate-700">
+                  <div class="flex items-center justify-between">
+                    <h3 class="text-sm font-medium text-slate-700 dark:text-slate-300">
+                      {nearestNeighborResult.label}
+                    </h3>
+                    <button
+                      class="text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+                      onclick={clearNearestNeighborSearch}
+                      aria-label="Clear nearest neighbor results"
+                      title="Clear nearest neighbor results"
+                    >
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="p-2 max-h-48 overflow-y-auto">
+                  {#if nearestNeighborResult.selectedPoint}
+                    <!-- Selected point info -->
+                    <div class="mb-2 p-2 bg-red-50 dark:bg-red-900/20 rounded border-l-4 border-red-400">
+                      <div class="text-xs font-medium text-red-700 dark:text-red-300 mb-1">Selected Player</div>
+                      {#key nearestNeighborResult.selectedPoint}
+                        {@const sel = nearestNeighborResult.selectedPoint}
+                        {@const selPlayerName = (sel as any).fields?.player_name
+                          ? (sel as any).fields.player_name
+                          : sel?.text
+                            ? (sel.text.match(/^([^,]+)/) ? sel.text.match(/^([^,]+)/)![1].trim() : sel.text.split(' ').slice(0, 2).join(' '))
+                            : (String(sel?.id).split('_')[0] || String(sel?.id))}
+                        <div class="flex items-center gap-2 justify-between">
+                          <div class="flex-1 min-w-0">
+                            <div class="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">{selPlayerName}</div>
+                            <div class="text-xs text-slate-500 dark:text-slate-400 truncate">ID: {sel?.id}</div>
+                          </div>
+                        </div>
+                      {/key}
+                    </div>
+                  {/if}
+                  
+                  <!-- Nearest neighbors list -->
+                  <div class="text-xs font-medium text-slate-500 dark:text-slate-400 mb-2">Similar Players</div>
+                  {#each nearestNeighborResult.items as item, index}
+                    {#if item.id !== selectedPointId}
+                      {@const playerName = item.text ? (item.text.match(/^([^,]+)/) ? item.text.match(/^([^,]+)/)![1].trim() : item.text.split(' ').slice(0, 2).join(' ')) : String(item.id).split('_')[0] || String(item.id)}
+                      {@const color = nearestNeighborResult.playerColors?.get(playerName) || `hsl(${200 + (index * 30) % 120}, ${70 + (index * 10) % 30}%, ${45 + (index * 5) % 20}%)`}
+                      <button 
+                        class="flex items-center gap-2 p-2 hover:bg-slate-50 dark:hover:bg-slate-800 rounded cursor-pointer transition-colors w-full text-left"
+                        onclick={async () => {
+                          scrollTableTo(item.id);
+                          searchResultHighlight = item;
+                          if (item.x != null && item.y != null) {
+                            await animateEmbeddingViewToPoint(item.id, item.x, item.y);
+                          } else {
+                            await animateEmbeddingViewToPoint(item.id);
+                          }
+                        }}
+                        aria-label={`View similar player ${playerName}`}
+                      >
+                        <div 
+                          class="w-3 h-3 rounded-full border-2 border-white shadow-sm"
+                          style:background-color={color}
+                        ></div>
+                        <div class="flex-1 min-w-0">
+                          <div class="text-sm font-medium text-slate-700 dark:text-slate-300 truncate">
+                            {playerName}
+                          </div>
+                          <div class="text-xs text-slate-500 dark:text-slate-400 truncate">
+                            ID: {item.id}
+                          </div>
+                          {#if item.text && item.text !== playerName}
+                            <div class="text-xs text-slate-500 dark:text-slate-400 truncate">
+                              {item.text}
+                            </div>
+                          {/if}
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <div class="text-xs text-slate-400 dark:text-slate-500">#{index + 1}</div>
+                        </div>
+                      </button>
+                    {/if}
+                  {/each}
+                </div>
+              </div>
+            {/if}
+            
             <PlotList
               bind:plots={plots}
               table={table}

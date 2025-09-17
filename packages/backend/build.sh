@@ -18,4 +18,9 @@ cp -r ../viewer/dist ./embedding_atlas/static
 
 npm run build
 
-uv build --wheel
+# Optionally build Python wheel if 'uv' is available
+if command -v uv >/dev/null 2>&1; then
+  uv build --wheel
+else
+  echo "'uv' not found; skipping Python wheel build."
+fi

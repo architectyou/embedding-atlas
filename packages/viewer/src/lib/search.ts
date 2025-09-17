@@ -46,7 +46,7 @@ class SearchWorkerAPI {
 export class FullTextSearcher implements Searcher {
   coordinator: Coordinator;
   table: string;
-  columns: { text: string; id: string };
+  columns: { id: string; text?: string | null; extraTexts?: string[] };
 
   backend: SearchWorkerAPI;
   currentIndex: { predicate: string | null } | null = null;
@@ -54,10 +54,7 @@ export class FullTextSearcher implements Searcher {
   constructor(
     coordinator: Coordinator,
     table: string,
-    columns: {
-      text: string;
-      id: string;
-    },
+    columns: { id: string; text?: string | null; extraTexts?: string[] },
   ) {
     this.coordinator = coordinator;
     this.table = table;
@@ -79,12 +76,22 @@ export class FullTextSearcher implements Searcher {
     if (this.currentIndex != null && this.currentIndex.predicate == predicateString) {
       return;
     }
+    // Build text expression: concatenate available text columns (text + extraTexts)
+    const textCols: string[] = [];
+    if (this.columns.text) textCols.push(this.columns.text);
+    if (this.columns.extraTexts && this.columns.extraTexts.length > 0) {
+      textCols.push(...this.columns.extraTexts);
+    }
+    const textExpr = textCols.length > 0
+      ? textCols.map(c => `COALESCE(${SQL.column(c)}, '')`).join(` || ' ' || `)
+      : `''`;
+
     let result;
     if (predicateString != null) {
       result = await this.coordinator.query(`
         SELECT
           ${SQL.column(this.columns.id)} AS id,
-          ${SQL.column(this.columns.text)} AS text
+          ${textExpr} AS text
         FROM ${this.table}
         WHERE ${predicateString}
       `);
@@ -92,7 +99,7 @@ export class FullTextSearcher implements Searcher {
       result = await this.coordinator.query(`
         SELECT
           ${SQL.column(this.columns.id)} AS id,
-          ${SQL.column(this.columns.text)} AS text
+          ${textExpr} AS text
         FROM ${this.table}
       `);
     }
@@ -189,16 +196,21 @@ export function resolveSearcher(options: {
   idColumn: string;
   textColumn?: string | null;
   neighborsColumn?: string | null;
+  additionalTextColumns?: string[];
 }): Searcher {
-  let { coordinator, table, idColumn, searcher, textColumn, neighborsColumn } = options;
+  let { coordinator, table, idColumn, searcher, textColumn, neighborsColumn, additionalTextColumns } = options;
 
   let result: Searcher = {};
 
   if (searcher != null && searcher.fullTextSearch != null) {
     result.fullTextSearch = searcher.fullTextSearch.bind(searcher);
-  } else if (textColumn != null) {
-    // FullTextSearcher on the text column.
-    let fts = new FullTextSearcher(coordinator, table, { id: idColumn, text: textColumn });
+  } else if (textColumn != null || (additionalTextColumns && additionalTextColumns.length > 0)) {
+    // Full-text searcher on provided text columns (primary + additional)
+    let fts = new FullTextSearcher(coordinator, table, {
+      id: idColumn,
+      text: textColumn ?? undefined,
+      extraTexts: additionalTextColumns ?? [],
+    });
     result.fullTextSearch = fts.fullTextSearch.bind(fts);
   }
 

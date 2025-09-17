@@ -4,6 +4,7 @@ Script to load data from Qdrant vector database and prepare it for Embedding Atl
 """
 
 import argparse
+import re
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,36 @@ def list_collections(client: QdrantClient) -> List[str]:
     """List all available collections."""
     collections = client.get_collections()
     return [c.name for c in collections.collections]
+
+
+def extract_year_from_source(source: str) -> Optional[int]:
+    """Extract year from source string."""
+    if not source or not isinstance(source, str):
+        return None
+
+    # 다양한 연도 패턴 매칭
+    patterns = [
+        r"\b(19|20)\d{2}\b",  # 1900-2099 연도
+        r"(\d{4})",  # 4자리 숫자
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, source)
+        for match in matches:
+            if isinstance(match, tuple):
+                year_str = "".join(match)
+            else:
+                year_str = match
+
+            try:
+                year = int(year_str)
+                # 합리적인 연도 범위 확인
+                if 1900 <= year <= 2030:
+                    return year
+            except ValueError:
+                continue
+
+    return None
 
 
 def extract_collection_data(
@@ -101,6 +132,21 @@ def extract_collection_data(
             data.append(row)
 
         df = pd.DataFrame(data)
+
+        # Extract year from source if available
+        if "source" in df.columns:
+            print("Extracting year from source column...")
+            df["year"] = df["source"].apply(extract_year_from_source)
+            year_count = df["year"].notna().sum()
+            print(f"Successfully extracted year for {year_count}/{len(df)} records")
+
+            # 연도별 분포 출력
+            if year_count > 0:
+                year_dist = df["year"].value_counts().sort_index()
+                print("Year distribution:")
+                for year, count in year_dist.head(10).items():
+                    print(f"  {year}: {count} records")
+
         print(f"DataFrame created with shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
 

@@ -1,5 +1,9 @@
 import { defineConfig } from "vite";
 import dts from "vite-plugin-dts";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function fixAbsoluteImport() {
   // Fix a bug where vite outputs absolute paths for workers.
@@ -56,5 +60,16 @@ export default defineConfig({
     },
     copyPublicDir: false,
     chunkSizeWarningLimit: 4096,
+  },
+  resolve: {
+    alias: [
+      {
+        find: "@embedding-atlas/density-clustering",
+        replacement: path.resolve(
+          __dirname,
+          "../density-clustering/density_clustering_wasm/js/index.js",
+        ),
+      },
+    ],
   },
 });

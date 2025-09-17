@@ -33,6 +33,12 @@ export const CustomTooltip = createCustomComponentClass<{
   onNearestNeighborSearch?: (id: any) => void;
 }>(Tooltip);
 
-export const CustomOverlay = createCustomComponentClass<{ proxy: OverlayProxy; items: SearchResultItem[] }>(
-  SearchResultOverlay,
-);
+export const CustomOverlay = createCustomComponentClass<{ 
+  proxy: OverlayProxy; 
+  items: SearchResultItem[];
+  highlightItem?: SearchResultItem | null;
+  nearestNeighborMode?: boolean;
+  selectedPointId?: any;
+  playerColors?: Map<string, string>;
+  playerGroups?: Map<string, SearchResultItem[]>;
+}>(SearchResultOverlay);
