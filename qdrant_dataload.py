@@ -4,14 +4,13 @@ Script to load data from Qdrant vector database and prepare it for Embedding Atl
 """
 
 import argparse
-import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, Match, MatchValue
+from qdrant_client.models import Filter
 
 
 def connect_to_qdrant(url: str = "http://localhost:6333") -> QdrantClient:
@@ -34,42 +33,12 @@ def list_collections(client: QdrantClient) -> List[str]:
     return [c.name for c in collections.collections]
 
 
-def extract_year_from_source(source: str) -> Optional[int]:
-    """Extract year from source string."""
-    if not source or not isinstance(source, str):
-        return None
-
-    # 다양한 연도 패턴 매칭
-    patterns = [
-        r"\b(19|20)\d{2}\b",  # 1900-2099 연도
-        r"(\d{4})",  # 4자리 숫자
-    ]
-
-    for pattern in patterns:
-        matches = re.findall(pattern, source)
-        for match in matches:
-            if isinstance(match, tuple):
-                year_str = "".join(match)
-            else:
-                year_str = match
-
-            try:
-                year = int(year_str)
-                # 합리적인 연도 범위 확인
-                if 1900 <= year <= 2030:
-                    return year
-            except ValueError:
-                continue
-
-    return None
-
-
 def create_display_fields(df: pd.DataFrame) -> pd.DataFrame:
     """Create intuitive display fields for visualization and search optimization."""
     df_copy = df.copy()
 
     # 선수 이름 필드 찾기 (다양한 가능한 컬럼명)
-    name_columns = ['name', 'player_name', 'player', 'athlete', 'person', 'title']
+    name_columns = ["name", "player_name", "player", "athlete", "person", "title"]
     name_col = None
     for col in name_columns:
         if col in df_copy.columns:
@@ -79,45 +48,65 @@ def create_display_fields(df: pd.DataFrame) -> pd.DataFrame:
     # 핵심 표시 필드 생성
     if name_col:
         # 연도와 선수 정보를 조합한 display_name 생성
-        if 'year' in df_copy.columns:
+        if "year" in df_copy.columns:
+
             def create_display_name(row):
                 name = row[name_col] if pd.notna(row[name_col]) else "Unknown"
-                year = f" ({int(row['year'])})" if pd.notna(row['year']) else ""
+                year = f" ({int(row['year'])})" if pd.notna(row["year"]) else ""
                 return f"{name}{year}"
 
-            df_copy['display_name'] = df_copy.apply(create_display_name, axis=1)
+            df_copy["display_name"] = df_copy.apply(create_display_name, axis=1)
             print(f"Created display_name field combining {name_col} and year")
         else:
-            df_copy['display_name'] = df_copy[name_col].fillna("Unknown")
+            df_copy["display_name"] = df_copy[name_col].fillna("Unknown")
 
-    # Embedding Atlas hover용 간결한 text 필드 생성
-    def create_hover_text(row):
-        parts = []
+    # 원본 텍스트 데이터를 text 필드로 사용 (자동 라벨링을 위해)
+    original_text_fields = [
+        "text",
+        "content",
+        "description",
+        "document",
+        "report",
+        "summary",
+    ]
+    original_text_col = None
 
-        # 기본 정보 (이름, 연도)
-        if name_col and pd.notna(row[name_col]):
-            parts.append(row[name_col])
-        if 'year' in df_copy.columns and pd.notna(row['year']):
-            parts.append(f"({int(row['year'])})")
+    for field in original_text_fields:
+        if field in df_copy.columns and pd.notna(df_copy[field]).any():
+            original_text_col = field
+            break
 
-        # 핵심 메타데이터만 (짧은 것들만)
-        if 'team' in df_copy.columns and pd.notna(row['team']):
-            team = str(row['team'])
-            if len(team) <= 20:  # 짧은 팀명만
+    if original_text_col:
+        # 원본 텍스트 데이터가 있으면 그대로 사용
+        df_copy["text"] = df_copy[original_text_col].fillna("No description")
+        print(
+            f"Using original text data from '{original_text_col}' field for clustering"
+        )
+    else:
+        # 원본 텍스트가 없으면 간결한 버전 생성 (fallback)
+        def create_fallback_text(row):
+            parts = []
+            if name_col and pd.notna(row[name_col]):
+                parts.append(row[name_col])
+            if "year" in df_copy.columns and pd.notna(row["year"]):
+                parts.append(f"({int(row['year'])})")
+            if "team" in df_copy.columns and pd.notna(row["team"]):
+                team = str(row["team"])[:20]
                 parts.append(team)
+            return " ".join(parts) if parts else f"ID: {row['id']}"
 
-        return " ".join(parts) if parts else f"ID: {row['id']}"
-
-    df_copy['text'] = df_copy.apply(create_hover_text, axis=1)
-    print("Created compact text field for hover tooltips")
+        df_copy["text"] = df_copy.apply(create_fallback_text, axis=1)
+        print("No original text found, created fallback text field")
 
     # 간단한 연도별 통계만
-    if 'year' in df_copy.columns:
-        year_count = df_copy['year'].notna().sum()
+    if "year" in df_copy.columns:
+        year_count = df_copy["year"].notna().sum()
         if year_count > 0:
-            years = df_copy['year'].dropna()
+            years = df_copy["year"].dropna()
             year_range = f"{int(years.min())}-{int(years.max())}"
-            print(f"Year data: {year_count}/{len(df_copy)} records, range: {year_range}")
+            print(
+                f"Year data: {year_count}/{len(df_copy)} records, range: {year_range}"
+            )
 
     return df_copy
 
@@ -191,12 +180,16 @@ def extract_collection_data(
 
         df = pd.DataFrame(data)
 
-        # Extract year from source if available
-        if "source" in df.columns:
-            print("Extracting year from source column...")
-            df["year"] = df["source"].apply(extract_year_from_source)
-            year_count = df["year"].notna().sum()
-            print(f"Successfully extracted year for {year_count}/{len(df)} records")
+        # 연도 필드 직접 매핑 (Qdrant 메타데이터에서)
+        year_fields = ["scouting_year", "year", "season", "date_year"]
+        for year_field in year_fields:
+            if year_field in df.columns:
+                df["year"] = pd.to_numeric(df[year_field], errors="coerce")
+                print(f"Using '{year_field}' as year field")
+                break
+
+        if "year" not in df.columns:
+            print("No year field found in Qdrant metadata")
 
         # Create intuitive display fields
         df = create_display_fields(df)
@@ -205,7 +198,7 @@ def extract_collection_data(
         print(f"Columns: {list(df.columns)}")
 
         # 핵심 필드 확인
-        key_fields = ['display_name', 'text', 'year', 'vector']
+        key_fields = ["display_name", "text", "year", "vector"]
         existing_key = [field for field in key_fields if field in df.columns]
         if existing_key:
             print(f"Key fields: {existing_key}")
@@ -262,12 +255,17 @@ def main():
         "--limit", type=int, help="Maximum number of points to extract (default: all)"
     )
     parser.add_argument(
-        "--year-filter", type=int, nargs="+",
-        help="Filter by specific years (e.g., --year-filter 2020 2021 2022)"
+        "--year-filter",
+        type=int,
+        nargs="+",
+        help="Filter by specific years (e.g., --year-filter 2020 2021 2022)",
     )
     parser.add_argument(
-        "--year-range", type=int, nargs=2, metavar=("START", "END"),
-        help="Filter by year range (e.g., --year-range 2020 2023)"
+        "--year-range",
+        type=int,
+        nargs=2,
+        metavar=("START", "END"),
+        help="Filter by year range (e.g., --year-range 2020 2023)",
     )
     parser.add_argument(
         "--list-collections",
@@ -296,13 +294,17 @@ def main():
         original_size = len(df)
 
         if args.year_filter:
-            df = df[df['year'].isin(args.year_filter)]
-            print(f"Filtered to years {args.year_filter}: {len(df)} records (from {original_size})")
+            df = df[df["year"].isin(args.year_filter)]
+            print(
+                f"Filtered to years {args.year_filter}: {len(df)} records (from {original_size})"
+            )
 
         elif args.year_range:
             start_year, end_year = args.year_range
-            df = df[(df['year'] >= start_year) & (df['year'] <= end_year)]
-            print(f"Filtered to years {start_year}-{end_year}: {len(df)} records (from {original_size})")
+            df = df[(df["year"] >= start_year) & (df["year"] <= end_year)]
+            print(
+                f"Filtered to years {start_year}-{end_year}: {len(df)} records (from {original_size})"
+            )
 
         if len(df) == 0:
             print("Warning: No data remaining after year filtering!")
@@ -311,19 +313,19 @@ def main():
     # Save to parquet
     save_to_parquet(df, args.output)
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"✅ Data extraction complete!")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
     # 요약 정보 출력
-    if 'year' in df.columns:
-        years = df['year'].dropna().unique()
+    if "year" in df.columns:
+        years = df["year"].dropna().unique()
         if len(years) > 0:
             year_range = f"{int(min(years))}-{int(max(years))}"
             print(f"📅 Data spans: {year_range} ({len(years)} different years)")
 
-    if 'display_name' in df.columns:
-        unique_players = df['display_name'].nunique()
+    if "display_name" in df.columns:
+        unique_players = df["display_name"].nunique()
         print(f"👤 Total unique entries: {unique_players}")
 
     print(f"📊 Total records: {len(df)}")
@@ -333,16 +335,22 @@ def main():
     print(f"   embedding-atlas {args.output} --vector vector")
 
     print("\n🔍 Key fields:")
-    print("   • text: hover tooltips")
-    print("   • display_name: player + year labels")
+    print("   • text: original content for automatic clustering labels")
+    print("   • display_name: player + year for identification")
     print("   • year: temporal filtering")
     print("   • vector: embedding coordinates")
 
-    if 'display_name' in df.columns and len(df) > 0:
-        print(f"\n📈 Sample entries:")
-        sample_names = df['display_name'].dropna().head(3).tolist()
+    if "display_name" in df.columns and len(df) > 0:
+        print("\n📈 Sample entries:")
+        sample_names = df["display_name"].dropna().head(3).tolist()
         for name in sample_names:
             print(f"   • {name}")
+
+    # 텍스트 필드 길이 통계 표시 (원본 텍스트 품질 확인용)
+    if "text" in df.columns:
+        text_lengths = df["text"].astype(str).str.len()
+        avg_length = text_lengths.mean()
+        print(f"\n📝 Text data quality: avg {avg_length:.0f} chars per entry")
 
 
 if __name__ == "__main__":
