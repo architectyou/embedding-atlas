@@ -898,7 +898,8 @@
                   }
                   scrollTableTo(pointId);
                   await doNearestNeighborSearch(pointId);
-                  await animateEmbeddingViewToPoint(pointId, undefined, undefined, { showTooltip: false });
+                  // 클릭 시 뷰포트 애니메이션 제거하여 줌 아웃 방지
+                  // await animateEmbeddingViewToPoint(pointId, undefined, undefined, { showTooltip: false });
                 }}
                 stateStore={plotStateStores.store("embedding-view")}
               />

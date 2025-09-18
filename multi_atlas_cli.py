@@ -86,6 +86,18 @@ class MultiDatasetAtlas:
                     "y": y_col,
                 }
 
+        # neighbors 컬럼 찾기 (__neighbors, neighbors 등) - UMAP 계산 후에 체크
+        neighbors_column = None
+        for col in ["__neighbors", "neighbors", "neighbor_ids"]:
+            if col in df.columns:
+                neighbors_column = col
+                break
+
+        # neighbors 컬럼이 있다면 메타데이터에 추가
+        if neighbors_column:
+            metadata["columns"]["neighbors"] = neighbors_column
+            print(f"Found neighbors column: {neighbors_column}")
+
         # 데이터소스 생성
         hasher = Hasher()
         hasher.update([parquet_path])
@@ -126,6 +138,7 @@ class MultiDatasetAtlas:
             try:
                 import numpy as np
                 import umap
+                from sklearn.neighbors import NearestNeighbors
 
                 # 벡터 추출
                 vectors = []
@@ -155,11 +168,33 @@ class MultiDatasetAtlas:
                 df[x_col] = projection[:, 0]
                 df[y_col] = projection[:, 1]
 
+                # Nearest neighbors 계산 (유사 선수 기능을 위해)
+                print("Computing nearest neighbors for similarity search...")
+                nn = NearestNeighbors(n_neighbors=21, metric='cosine')  # 20개 + 자기 자신
+                nn.fit(vectors)
+
+                # 각 점에 대한 nearest neighbors 저장
+                neighbors_list = []
+                for i in range(len(vectors)):
+                    distances, indices = nn.kneighbors([vectors[i]])
+                    # 자기 자신 제외하고 상위 20개
+                    neighbor_indices = [int(idx) for idx in indices[0][1:21]]
+                    neighbor_distances = [float(dist) for dist in distances[0][1:21]]
+                    # 기본 CLI와 같은 형식으로 저장: {"distances": [...], "ids": [...]}
+                    neighbors_list.append({
+                        "distances": neighbor_distances,
+                        "ids": neighbor_indices
+                    })
+
+                # DataFrame에 neighbors 추가
+                df["__neighbors"] = neighbors_list
+
                 print(f"UMAP projection completed: {x_col}, {y_col}")
+                print("Nearest neighbors computed for similarity search")
                 return x_col, y_col
 
             except ImportError:
-                print("UMAP not available, skipping projection")
+                print("UMAP or sklearn not available, skipping projection")
                 return None, None
             except Exception as e:
                 print(f"Error computing projection: {e}")
