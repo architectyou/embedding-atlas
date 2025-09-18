@@ -33,32 +33,28 @@ def list_collections(client: QdrantClient) -> List[str]:
     return [c.name for c in collections.collections]
 
 
-def create_display_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """Create intuitive display fields for visualization and search optimization."""
+def extract_year_from_source(source: str) -> Optional[int]:
+    """Extract year from source file path."""
+    if not source or not isinstance(source, str):
+        return None
+
+    # 파일명에서 4자리 연도 찾기
+    import re
+    pattern = r'(?:19|20)\d{2}'  # 1900-2099 연도 패턴 (non-capturing group 사용)
+    matches = re.findall(pattern, source)
+
+    if matches:
+        # 가장 마지막에 나오는 연도가 보통 맞음
+        year = int(matches[-1])
+        if 1900 <= year <= 2030:
+            return year
+
+    return None
+
+
+def setup_text_field(df: pd.DataFrame) -> pd.DataFrame:
+    """Setup text field for automatic clustering."""
     df_copy = df.copy()
-
-    # 선수 이름 필드 찾기 (다양한 가능한 컬럼명)
-    name_columns = ["name", "player_name", "player", "athlete", "person", "title"]
-    name_col = None
-    for col in name_columns:
-        if col in df_copy.columns:
-            name_col = col
-            break
-
-    # 핵심 표시 필드 생성
-    if name_col:
-        # 연도와 선수 정보를 조합한 display_name 생성
-        if "year" in df_copy.columns:
-
-            def create_display_name(row):
-                name = row[name_col] if pd.notna(row[name_col]) else "Unknown"
-                year = f" ({int(row['year'])})" if pd.notna(row["year"]) else ""
-                return f"{name}{year}"
-
-            df_copy["display_name"] = df_copy.apply(create_display_name, axis=1)
-            print(f"Created display_name field combining {name_col} and year")
-        else:
-            df_copy["display_name"] = df_copy[name_col].fillna("Unknown")
 
     # 원본 텍스트 데이터를 text 필드로 사용 (자동 라벨링을 위해)
     original_text_fields = [
@@ -68,45 +64,19 @@ def create_display_fields(df: pd.DataFrame) -> pd.DataFrame:
         "document",
         "report",
         "summary",
+        "scouting_report"
     ]
-    original_text_col = None
 
     for field in original_text_fields:
         if field in df_copy.columns and pd.notna(df_copy[field]).any():
-            original_text_col = field
+            if field != "text":  # 이미 text 필드가 아닌 경우에만 복사
+                df_copy["text"] = df_copy[field].fillna("No description")
+                print(f"Using '{field}' as text field for clustering")
+            else:
+                print("Using existing 'text' field for clustering")
             break
-
-    if original_text_col:
-        # 원본 텍스트 데이터가 있으면 그대로 사용
-        df_copy["text"] = df_copy[original_text_col].fillna("No description")
-        print(
-            f"Using original text data from '{original_text_col}' field for clustering"
-        )
     else:
-        # 원본 텍스트가 없으면 간결한 버전 생성 (fallback)
-        def create_fallback_text(row):
-            parts = []
-            if name_col and pd.notna(row[name_col]):
-                parts.append(row[name_col])
-            if "year" in df_copy.columns and pd.notna(row["year"]):
-                parts.append(f"({int(row['year'])})")
-            if "team" in df_copy.columns and pd.notna(row["team"]):
-                team = str(row["team"])[:20]
-                parts.append(team)
-            return " ".join(parts) if parts else f"ID: {row['id']}"
-
-        df_copy["text"] = df_copy.apply(create_fallback_text, axis=1)
-        print("No original text found, created fallback text field")
-
-    # 간단한 연도별 통계만
-    if "year" in df_copy.columns:
-        year_count = df_copy["year"].notna().sum()
-        if year_count > 0:
-            years = df_copy["year"].dropna()
-            year_range = f"{int(years.min())}-{int(years.max())}"
-            print(
-                f"Year data: {year_count}/{len(df_copy)} records, range: {year_range}"
-            )
+        print("Warning: No text field found for clustering")
 
     return df_copy
 
@@ -180,25 +150,55 @@ def extract_collection_data(
 
         df = pd.DataFrame(data)
 
-        # 연도 필드 직접 매핑 (Qdrant 메타데이터에서)
+        # 연도 필드 매핑 (Qdrant 메타데이터에서 또는 source에서 추출)
         year_fields = ["scouting_year", "year", "season", "date_year"]
+        found_year = False
+
         for year_field in year_fields:
             if year_field in df.columns:
-                df["year"] = pd.to_numeric(df[year_field], errors="coerce")
-                print(f"Using '{year_field}' as year field")
+                # year가 아닌 다른 필드를 year로 매핑하는 경우에만 변환
+                if year_field != "year":
+                    df["year"] = pd.to_numeric(df[year_field], errors="coerce")
+                    print(f"Mapped '{year_field}' to year field")
+                else:
+                    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+                    print("Using existing 'year' field")
+                found_year = True
                 break
 
-        if "year" not in df.columns:
-            print("No year field found in Qdrant metadata")
+        if not found_year and "source" in df.columns:
+            # source 필드에서 연도 추출
+            print("Extracting year from source field...")
+            df["year"] = df["source"].apply(extract_year_from_source)
+            year_count = df["year"].notna().sum()
+            print(f"Extracted year from source: {year_count}/{len(df)} records")
+            found_year = year_count > 0
 
-        # Create intuitive display fields
-        df = create_display_fields(df)
+        # year 필드를 문자열로 변환 (categorical 처리를 위해)
+        if "year" in df.columns and df["year"].notna().any():
+            df["year"] = df["year"].astype(str).replace("nan", None)
+            print("Converted year field to string for categorical filtering")
+
+
+        if not found_year:
+            print("No year information found")
+
+        # Setup text field for clustering
+        df = setup_text_field(df)
+
+        # 연도별 간단한 통계
+        if "year" in df.columns:
+            year_count = df["year"].notna().sum()
+            if year_count > 0:
+                years = df["year"].dropna()
+                year_range = f"{int(years.min())}-{int(years.max())}"
+                print(f"Year data: {year_count}/{len(df)} records, range: {year_range}")
 
         print(f"DataFrame created with shape: {df.shape}")
         print(f"Columns: {list(df.columns)}")
 
         # 핵심 필드 확인
-        key_fields = ["display_name", "text", "year", "vector"]
+        key_fields = ["text", "year", "vector"]
         existing_key = [field for field in key_fields if field in df.columns]
         if existing_key:
             print(f"Key fields: {existing_key}")
@@ -244,7 +244,7 @@ def main():
         help="Qdrant server URL (default: http://localhost:6333)",
     )
     parser.add_argument(
-        "--collection", required=True, help="Name of the Qdrant collection to extract"
+        "--collection", help="Name of the Qdrant collection to extract"
     )
     parser.add_argument(
         "--output",
@@ -286,6 +286,12 @@ def main():
             print(f"  - {collection}")
         return
 
+    # Collection name is required if not listing collections
+    if not args.collection:
+        print("Error: --collection is required when not using --list-collections")
+        parser.print_help()
+        return
+
     # Extract data
     df = extract_collection_data(client, args.collection, args.limit)
 
@@ -324,27 +330,19 @@ def main():
             year_range = f"{int(min(years))}-{int(max(years))}"
             print(f"📅 Data spans: {year_range} ({len(years)} different years)")
 
-    if "display_name" in df.columns:
-        unique_players = df["display_name"].nunique()
-        print(f"👤 Total unique entries: {unique_players}")
-
     print(f"📊 Total records: {len(df)}")
     print(f"💾 Saved to: {args.output}")
 
-    print(f"\n🚀 To visualize with Embedding Atlas:")
-    print(f"   embedding-atlas {args.output} --vector vector")
+    print("\n🚀 To visualize with Embedding Atlas:")
+    print("   embedding-atlas {} --vector vector".format(args.output))
 
-    print("\n🔍 Key fields:")
-    print("   • text: original content for automatic clustering labels")
-    print("   • display_name: player + year for identification")
-    print("   • year: temporal filtering")
+    print("\n🔍 Key fields for filtering:")
+    print("   • player_name: filter by specific player")
+    print("   • year: filter by year")
+    print("   • position: filter by playing position")
+    print("   • team: filter by team")
+    print("   • text: original scouting content for clustering")
     print("   • vector: embedding coordinates")
-
-    if "display_name" in df.columns and len(df) > 0:
-        print("\n📈 Sample entries:")
-        sample_names = df["display_name"].dropna().head(3).tolist()
-        for name in sample_names:
-            print(f"   • {name}")
 
     # 텍스트 필드 길이 통계 표시 (원본 텍스트 품질 확인용)
     if "text" in df.columns:

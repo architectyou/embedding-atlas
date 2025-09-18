@@ -1059,7 +1059,8 @@
                 </div>
               </div>
             {/if}
-            
+
+
             <PlotList
               bind:plots={plots}
               table={table}
