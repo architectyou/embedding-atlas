@@ -2,6 +2,8 @@
 
 Embedding Atlas is a tool that provides interactive visualizations for large embeddings. It allows you to visualize, cross-filter, and search embeddings and metadata.
 
+**📖 [Complete Project Documentation →](PROJECT_INDEX.md)**
+
 **Features**
 
 - 🏷️ **Automatic data clustering & labeling:**
@@ -121,6 +123,12 @@ Python:
 Documentation:
 
 - `packages/docs`: The documentation website.
+
+**📋 Developer Resources:**
+- **[Complete Project Index](PROJECT_INDEX.md)** - Comprehensive architecture guide
+- **[Claude Code Guide](CLAUDE.md)** - Development environment setup and patterns
+- **[Build Workflows](PROJECT_INDEX.md#-development-workflows)** - Build system and testing
+- **[Usage Patterns](PROJECT_INDEX.md#-usage-patterns)** - API examples and data requirements
 
 For more information, please visit <https://apple.github.io/embedding-atlas/develop.html>.
 

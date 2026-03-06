@@ -316,15 +316,14 @@ def main(host, port, auto_port, duckdb, static):
     # Parquet 파일들 자동 감지 및 추가
     # 엔드포인트 이름, 파일명, 벡터 컬럼명
     parquet_files = [
-        ("scouting_report_bgem3", "scouting_report_bgem3_with_year.parquet", "vector"),
         (
-            "scouting_report_openai",
-            "scouting_report_openai_with_year.parquet",
+            "scouting_report_openai_masked",
+            "scouting_report_openai_masked.parquet",
             "vector",
         ),
         (
-            "scouting_report_qwen8b",
-            "scouting_report_qwen8b_with_year.parquet",
+            "scouting_report_openai_unmasked",
+            "scouting_report_openai_with_year.parquet",
             "vector",
         ),
     ]
